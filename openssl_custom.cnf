@@ -1,0 +1,3 @@
+[system_default_sect]
+MinProtocol = TLSv1
+CipherString = DEFAULT@SECLEVEL=0
