@@ -1,13 +1,20 @@
 import os
+import sys
 import pymssql
 from dotenv import load_dotenv, set_key
 
 
 class ConnectionManager:
     def __init__(self):
-        load_dotenv()
+        if getattr(sys, 'frozen', False):
+            env_path = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+            env_path = os.path.join(env_path, '.env')
+        else:
+            env_path = os.path.join(os.getcwd(), '.env')
+        
+        load_dotenv(env_path)
         self.connection = None
-        self.env_file = os.path.join(os.getcwd(), '.env')
+        self.env_file = env_path
         self.config = {
             'server': os.getenv('DB_HOST', ''),
             'port': os.getenv('DB_PORT', '1433'),
@@ -20,18 +27,23 @@ class ConnectionManager:
         return all([self.config['server'], self.config['database'], self.config['user'], self.config['password']])
 
     def save_config(self, server=None, database=None, user=None, password=None, driver=None):
+        if getattr(sys, 'frozen', False):
+            env_file = os.path.join(os.path.dirname(sys.executable), '.env')
+        else:
+            env_file = self.env_file
+        
         if server:
             self.config['server'] = server
-            set_key(self.env_file, 'DB_HOST', server)
+            set_key(env_file, 'DB_HOST', server)
         if database:
             self.config['database'] = database
-            set_key(self.env_file, 'DB_NAME', database)
+            set_key(env_file, 'DB_NAME', database)
         if user:
             self.config['user'] = user
-            set_key(self.env_file, 'DB_USER', user)
+            set_key(env_file, 'DB_USER', user)
         if password:
             self.config['password'] = password
-            set_key(self.env_file, 'DB_PASS', password)
+            set_key(env_file, 'DB_PASS', password)
 
     def connect(self):
         try:

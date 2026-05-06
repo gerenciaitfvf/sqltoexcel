@@ -59,7 +59,8 @@ SELECT
 		where cxp.ConsecutivoCompania = PERIODO.ConsecutivoCompania 
 			and comp.ConsecutivoPeriodo = PERIODO.ConsecutivoPeriodo
 		)
-	and cxp.ConsecutivoCompania = 10
+	--and cxp.ConsecutivoCompania = 10
+	  and cxp.ConsecutivoCompania in (10, 5)
 	-- and cxp.Numero = '00006235' --'0073'  --'00006235'
 
   order by ConsecutivoCxp asc
