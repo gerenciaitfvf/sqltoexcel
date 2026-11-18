@@ -38,10 +38,11 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
   - `pyinstaller SQL2Excel.spec`
 
 ## Tests and linting status
-- There is currently no committed test suite (`tests/` not present) and no lint/format config in repository files.
-- If adding tests with pytest, use:
-  - Run all tests: `python -m pytest -q`
-  - Run one test: `python -m pytest tests/test_executor.py::test_apply_date_filter -q`
+- Tests live in `tests/` (pytest); they stub the database, so no SQL Server is needed. No lint/format config yet.
+- Install test deps: `pip install -r web/requirements-dev.txt`
+- Run all tests: `python -m pytest -q`
+- Run one test: `python -m pytest tests/test_web.py::test_descarga_con_rango -q`
+- Web version: `uvicorn web.app:app --host 0.0.0.0 --port 8000` (see README "Versión Web").
 
 ## High-level architecture (big picture)
 - UI orchestration lives in `src/gui/main_window.py`:

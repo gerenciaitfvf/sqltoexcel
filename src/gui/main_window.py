@@ -14,17 +14,18 @@ from src.export.excel_writer import ExcelExporter
 
 
 class ExecuteQueryThread(QThread):
-    def __init__(self, executor, file_path, fecha_fin):
+    def __init__(self, executor, file_path, fecha_fin, fecha_inicio=None):
         super().__init__()
         self.executor = executor
         self.file_path = file_path
         self.fecha_fin = fecha_fin
+        self.fecha_inicio = fecha_inicio
         self.df = None
         self.error = None
 
     def run(self):
         try:
-            self.df = self.executor.execute_from_file(self.file_path, self.fecha_fin)
+            self.df = self.executor.execute_from_file(self.file_path, self.fecha_fin, self.fecha_inicio)
         except Exception as e:
             self.error = str(e)
 
@@ -44,6 +45,7 @@ class MainWindow(QMainWindow):
         
         self.current_file = None
         self.fecha_fin = None
+        self.fecha_inicio = None
         self.auto_connect_attempted = False
         self.init_ui()
         self.auto_connect()
@@ -62,6 +64,18 @@ class MainWindow(QMainWindow):
         self.script_list = QListWidget()
         self.script_list.itemClicked.connect(self.on_script_selected)
         layout.addWidget(self.script_list)
+
+        self.inicio_label = QLabel("Fecha inicio ( parámetro ):")
+        self.inicio_label.setVisible(False)
+        layout.addWidget(self.inicio_label)
+
+        self.inicio_input = QDateEdit()
+        self.inicio_input.setCalendarPopup(True)
+        self.inicio_input.setDate(QDate.currentDate())
+        self.inicio_input.setMaximumDate(QDate.currentDate())
+        self.inicio_input.setVisible(False)
+        self.inicio_input.dateChanged.connect(self.on_inicio_changed)
+        layout.addWidget(self.inicio_input)
 
         self.param_label = QLabel("")
         layout.addWidget(self.param_label)
@@ -112,7 +126,19 @@ class MainWindow(QMainWindow):
         with open(self.current_file, 'r', encoding='latin-1') as f:
             sql_content = f.read()
         
-        if self.executor.has_date_params(sql_content):
+        if self.executor.has_start_param(sql_content):
+            inicio_default, _ = self.executor.default_dates(sql_content)
+            if inicio_default:
+                self.inicio_input.setDate(QDate(inicio_default.year, inicio_default.month, inicio_default.day))
+            self.inicio_label.setVisible(True)
+            self.inicio_input.setVisible(True)
+            self.fecha_inicio = self.inicio_input.date().toPyDate()
+        else:
+            self.inicio_label.setVisible(False)
+            self.inicio_input.setVisible(False)
+            self.fecha_inicio = None
+
+        if self.executor.has_end_param(sql_content):
             self.param_label.setText("Fecha fin ( parámetro ):")
             self.fecha_input.setVisible(True)
             self.fecha_fin = self.fecha_input.date().toPyDate()
@@ -127,12 +153,19 @@ class MainWindow(QMainWindow):
     def on_fecha_changed(self, date):
         self.fecha_fin = date.toPyDate()
 
+    def on_inicio_changed(self, date):
+        self.fecha_inicio = date.toPyDate()
+
     def open_config(self):
         dialog = ConfigDialog(self.conn_manager, self)
         dialog.exec()
 
     def execute_query(self):
         if not self.current_file:
+            return
+
+        if self.fecha_inicio and self.fecha_fin and self.fecha_inicio > self.fecha_fin:
+            QMessageBox.warning(self, "Fechas", "La fecha de inicio no puede ser posterior a la fecha fin.")
             return
         
         if not self.conn_manager.is_connected():
@@ -148,7 +181,7 @@ class MainWindow(QMainWindow):
         self.progress.setFormat("Conectado - Ejecutando consulta...")
         self.status_bar.showMessage("Ejecutando consulta...")
 
-        self.thread = ExecuteQueryThread(self.executor, self.current_file, self.fecha_fin)
+        self.thread = ExecuteQueryThread(self.executor, self.current_file, self.fecha_fin, self.fecha_inicio)
         self.thread.finished.connect(self.on_query_finished)
         self.thread.start()
 

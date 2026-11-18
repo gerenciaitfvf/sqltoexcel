@@ -65,3 +65,36 @@ El sistema logra su funcionamiento gracias al uso del siguiente stack de Python:
    ```bash
    python main.py
    ```
+
+---
+
+## 🌐 Versión Web (red local)
+
+Además de la app de escritorio, el proyecto incluye una versión web en `web/` para desplegar en un servidor de la red local. El usuario abre la página, elige el informe (y la fecha de corte si el SQL la usa) y descarga el `.xlsx`. No tiene login, así que **no debe exponerse a internet**.
+
+* `web/app.py`: servidor FastAPI. Reutiliza `src/database` y `src/export`.
+* `web/static/index.html`: la página de informes.
+* Los informes son los `.sql` de `Querys/`; la lista se relee en cada carga de página.
+* **Rango de fechas:** si un `.sql` contiene `comp.Fecha > 'AAAA-MM-DD'` o `mb.Fecha > '...'`, aparece el campo **Desde**; si contiene `... < 'AAAA-MM-DD'`, aparece **Hasta**. Ambas fechas son inclusivas: Desde 01/01/2025 y Hasta 31/01/2026 se aplican como `> '2024-12-31'` y `< '2026-02-01'`. Lo mismo vale para la app de escritorio.
+
+### Opción A: Docker (recomendado)
+
+1. Crear el `.env` en la raíz con `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS` (idealmente un usuario de SQL Server de solo lectura).
+2. Levantar el servicio:
+   ```bash
+   docker compose up -d --build
+   ```
+3. Abrir `http://<ip-del-servidor>:8000` desde cualquier equipo de la red.
+
+`Querys/` se monta como volumen: para añadir o cambiar un informe basta con copiar el `.sql` a esa carpeta, sin reconstruir.
+
+### Opción B: Sin Docker
+
+```bash
+python -m venv venv-web
+source venv-web/bin/activate
+pip install -r web/requirements.txt
+uvicorn web.app:app --host 0.0.0.0 --port 8000 --workers 2
+```
+
+Variables opcionales: `QUERYS_DIR` (otra carpeta de `.sql`) y `SQL_DEBUG=1` (guarda el último SQL ejecutado en `/tmp/debug_last_query.sql`).

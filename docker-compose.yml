@@ -1,0 +1,12 @@
+services:
+  sql2excel-web:
+    build: .
+    container_name: sql2excel-web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    # Credenciales de SQL Server: DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
+    env_file: .env
+    volumes:
+      # Montar Querys permite añadir o editar .sql sin reconstruir la imagen
+      - ./Querys:/app/Querys:ro
