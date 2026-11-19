@@ -3,6 +3,9 @@ import os
 from datetime import datetime
 from openpyxl import Workbook
 
+# Filas que se piden a la base de datos por lote al exportar en streaming.
+STREAM_CHUNK_SIZE = 5000
+
 
 def build_workbook(df, sheet_name='Data'):
     """Crea un Workbook con la fila de encabezados y luego los datos."""
@@ -27,6 +30,30 @@ def workbook_bytes(df, sheet_name='Data'):
     buffer = io.BytesIO()
     build_workbook(df, sheet_name).save(buffer)
     return buffer.getvalue()
+
+
+def write_workbook_stream(cursor, path, sheet_name='Data', chunk_size=STREAM_CHUNK_SIZE):
+    """Escribe un .xlsx directamente desde un cursor DBAPI2, por lotes.
+
+    Usa el modo write_only de openpyxl para no mantener el libro en memoria:
+    imprescindible con resultados grandes en servidores con poca RAM.
+    Devuelve el número de filas escritas.
+    """
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet(sheet_name)
+    ws.append([str(d[0]) for d in cursor.description])
+
+    total = 0
+    while True:
+        rows = cursor.fetchmany(chunk_size)
+        if not rows:
+            break
+        for row in rows:
+            ws.append([None if _is_null(v) else v for v in row])
+        total += len(rows)
+
+    wb.save(path)
+    return total
 
 
 class ExcelExporter:

@@ -39,15 +39,32 @@ def fake_db(monkeypatch):
         'Fecha': pd.to_datetime(['2026-01-01', None, '2026-03-01']),
     }), 'disconnects': 0}
 
-    def read_sql(sql, conn):
-        state['sql'] = sql
-        if isinstance(state['df'], Exception):
-            raise state['df']
-        return state['df']
+    class FakeCursor:
+        def __init__(self, df):
+            self.error = df if isinstance(df, Exception) else None
+            self.description = [] if self.error else [(str(c),) for c in df.columns]
+            self.rows = [] if self.error else list(df.itertuples(index=False, name=None))
+            self.pos = 0
 
-    monkeypatch.setattr(pd, 'read_sql', read_sql)
+        def execute(self, sql):
+            state['sql'] = sql
+            if self.error:
+                raise self.error
+
+        def fetchmany(self, n):
+            chunk = self.rows[self.pos:self.pos + n]
+            self.pos += len(chunk)
+            return chunk
+
+        def close(self):
+            pass
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor(state['df'])
+
     monkeypatch.setattr(ConnectionManager, 'has_config', lambda self: True)
-    monkeypatch.setattr(ConnectionManager, 'get_connection', lambda self: object())
+    monkeypatch.setattr(ConnectionManager, 'get_connection', lambda self: FakeConnection())
 
     def disconnect(self):
         state['disconnects'] += 1
@@ -131,7 +148,7 @@ def test_descarga_con_rango(client, fake_db):
     r = client.get('/api/informes/rango', params={'inicio': '2026-03-01', 'fin': '2026-06-30'})
     assert r.status_code == 200
     assert r.headers['content-type'].startswith('application/vnd.openxmlformats')
-    assert "filename*=UTF-8''rango_2026-03-01_a_2026-06-30.xlsx" in r.headers['content-disposition']
+    assert "filename=\"rango_2026-03-01_a_2026-06-30.xlsx\"" in r.headers['content-disposition']
     assert r.headers['x-filas'] == '3'
     assert "> '2026-02-28'" in fake_db['sql'] and "< '2026-07-01'" in fake_db['sql']
     filas = [[c.value for c in row] for row in load_workbook(io.BytesIO(r.content)).active.iter_rows()]

@@ -3,6 +3,8 @@ import re
 import pandas as pd
 from datetime import date, datetime, timedelta
 
+from src.export.excel_writer import write_workbook_stream
+
 
 def _to_date(value):
     if isinstance(value, datetime):
@@ -56,10 +58,39 @@ class QueryExecutor:
         return sql_content
 
     def execute_query(self, sql_content, fecha_fin=None, fecha_inicio=None):
+        sql_content = self._prepare_sql(sql_content, fecha_fin, fecha_inicio)
+        conn = self.conn_manager.get_connection()
+        try:
+            df = pd.read_sql(sql_content, conn)
+            return df
+        except Exception as e:
+            raise Exception(f"Error al ejecutar la consulta: {str(e)}")
+
+    def execute_query_to_xlsx(self, sql_content, path, fecha_fin=None, fecha_inicio=None, sheet_name='Data'):
+        """Ejecuta la consulta y escribe el resultado en un .xlsx por streaming.
+
+        Evita cargar todo el resultado en memoria (DataFrame + workbook), que
+        agotaba la RAM del servidor con informes grandes. Devuelve el nº de filas.
+        """
+        sql_content = self._prepare_sql(sql_content, fecha_fin, fecha_inicio)
+        conn = self.conn_manager.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(sql_content)
+            return write_workbook_stream(cursor, path, sheet_name)
+        except Exception as e:
+            raise Exception(f"Error al ejecutar la consulta: {str(e)}")
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    def _prepare_sql(self, sql_content, fecha_fin, fecha_inicio):
         if fecha_inicio and fecha_fin and _to_date(fecha_inicio) > _to_date(fecha_fin):
             raise ValueError('La fecha de inicio no puede ser posterior a la fecha fin')
         sql_content = self.apply_date_filter(sql_content, fecha_fin, fecha_inicio)
-        
+
         # DEBUG (opcional): SQL_DEBUG=1 guarda el SQL final para inspección
         if os.getenv('SQL_DEBUG'):
             try:
@@ -68,13 +99,7 @@ class QueryExecutor:
                 print(f"DEBUG: SQL guardado en /tmp/debug_last_query.sql ({len(sql_content)} bytes)")
             except Exception as debug_err:
                 print(f"DEBUG: No se pudo guardar debug SQL: {debug_err}")
-
-        conn = self.conn_manager.get_connection()
-        try:
-            df = pd.read_sql(sql_content, conn)
-            return df
-        except Exception as e:
-            raise Exception(f"Error al ejecutar la consulta: {str(e)}")
+        return sql_content
 
     def execute_from_file(self, file_path, fecha_fin=None, fecha_inicio=None):
         with open(file_path, 'r', encoding='latin-1') as f:

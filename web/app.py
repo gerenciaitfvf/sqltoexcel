@@ -8,19 +8,19 @@ Ejecutar desde la raíz del repositorio:
 """
 import os
 import sys
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.database.connection import ConnectionManager  # noqa: E402
 from src.database.executor import QueryExecutor  # noqa: E402
-from src.export.excel_writer import workbook_bytes  # noqa: E402
 
 QUERYS_DIR = Path(os.getenv('QUERYS_DIR', ROOT / 'Querys')).resolve()
 SQL_ENCODING = 'latin-1'
@@ -38,6 +38,13 @@ def _scripts():
 
 def _read_sql(path):
     return path.read_text(encoding=SQL_ENCODING)
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 @app.get('/', include_in_schema=False)
@@ -83,10 +90,12 @@ def descargar_informe(
     if inicio and fin and inicio > fin:
         raise HTTPException(status_code=400, detail='La fecha de inicio no puede ser posterior a la fecha fin')
 
+    fd, tmp_path = tempfile.mkstemp(prefix=f'{nombre}_', suffix='.xlsx')
+    os.close(fd)
     try:
-        df = executor.execute_query(sql, fin, inicio)
-        contenido = workbook_bytes(df)
+        filas = executor.execute_query_to_xlsx(sql, tmp_path, fin, inicio)
     except Exception as e:
+        _remove(tmp_path)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn_manager.disconnect()
@@ -98,11 +107,10 @@ def descargar_informe(
     else:
         sufijo = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f'{nombre}_{sufijo}.xlsx'
-    return Response(
-        content=contenido,
+    return FileResponse(
+        tmp_path,
         media_type=XLSX_MIME,
-        headers={
-            'Content-Disposition': f"attachment; filename*=UTF-8''{quote(filename)}",
-            'X-Filas': str(len(df)),
-        },
+        filename=filename,
+        headers={'X-Filas': str(filas)},
+        background=BackgroundTask(_remove, tmp_path),
     )
