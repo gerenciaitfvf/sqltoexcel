@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 import web.app as webapp
 from src.database.connection import ConnectionManager
 from src.database.executor import QueryExecutor
+from web import jobs, mailer, settings, worker
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -26,7 +27,7 @@ def querys(tmp_path, monkeypatch):
     (tmp_path / 'simple.sql').write_text(SQL_SIMPLE, encoding='latin-1')
     (tmp_path / 'acentos_ñ.sql').write_text("SELECT 'año' AS c", encoding='latin-1')
     (tmp_path / 'no_sql.txt').write_text('ignorar')
-    monkeypatch.setattr(webapp, 'QUERYS_DIR', tmp_path)
+    monkeypatch.setattr(webapp.reports, 'QUERYS_DIR', tmp_path)
     return tmp_path
 
 
@@ -75,6 +76,27 @@ def fake_db(monkeypatch):
 @pytest.fixture
 def client(querys, fake_db):
     return TestClient(webapp.app)
+
+
+@pytest.fixture
+def job_env(tmp_path, monkeypatch, querys):
+    """Cola en un SQLite temporal y envío de correo simulado."""
+    monkeypatch.setattr(settings, 'DB_PATH', tmp_path / 'jobs.db')
+    monkeypatch.setattr(settings, 'REPORTS_DIR', tmp_path / 'reportes')
+    monkeypatch.setattr(settings, 'PUBLIC_BASE_URL', 'http://test.local')
+    monkeypatch.setattr(settings, 'DOWNLOAD_TTL_HOURS', 72)
+    monkeypatch.setattr(settings, 'MAX_JOBS_PER_HOUR', 10)
+    monkeypatch.setattr(settings, 'ALLOWED_RECIPIENTS', [
+        'jesus.ramos@fvf.com.ve',
+        'wilman.sanchez@fvf.com.ve',
+    ])
+    enviados = []
+    monkeypatch.setattr(
+        mailer, 'send_report_email',
+        lambda to, *args, **kwargs: enviados.append((to, args, kwargs)),
+    )
+    jobs.init_db()
+    return enviados
 
 
 # ---------- executor ----------
@@ -210,3 +232,68 @@ def test_sin_configuracion(querys, monkeypatch):
     monkeypatch.setattr(ConnectionManager, 'has_config', lambda self: False)
     r = TestClient(webapp.app).get('/api/informes/simple')
     assert r.status_code == 500 and '.env' in r.json()['detail']
+
+
+# ---------- cola de correo ----------
+
+def _procesar(client, nombre, **params):
+    r = client.post(f'/api/informes/{nombre}/email', params=params)
+    assert r.status_code == 202, r.text
+    job_id = r.json()['id']
+    worker.process_job(jobs.get_job(job_id))
+    return jobs.get_job(job_id)
+
+
+def test_encolar_procesar_y_descargar(client, fake_db, job_env):
+    job = _procesar(client, 'rango', inicio='2026-03-01', fin='2026-06-30')
+    assert job['status'] == 'listo'
+    assert job['filas'] == 3
+    assert [e[0] for e in job_env] == ['jesus.ramos@fvf.com.ve', 'wilman.sanchez@fvf.com.ve']
+    assert 'http://test.local/descargas/' in job_env[0][1][2]
+
+    d = client.get(f'/descargas/{job["token"]}')
+    assert d.status_code == 200
+    assert d.headers['content-type'].startswith('application/vnd.openxmlformats')
+    assert 'rango_2026-03-01_a_2026-06-30.xlsx' in d.headers['content-disposition']
+    filas = [[c.value for c in row] for row in load_workbook(io.BytesIO(d.content)).active.iter_rows()]
+    assert len(filas) == 4
+
+
+def test_token_caducado(client, fake_db, job_env):
+    job = _procesar(client, 'simple')
+    jobs._update(job['id'], expires_at='2000-01-01T00:00:00+00:00')
+    assert client.get(f'/descargas/{job["token"]}').status_code == 410
+
+
+def test_token_invalido(client):
+    assert client.get('/descargas/token-que-no-existe').status_code == 404
+
+
+def test_sin_destinatarios(client, job_env, monkeypatch):
+    monkeypatch.setattr(settings, 'ALLOWED_RECIPIENTS', [])
+    assert client.post('/api/informes/simple/email').status_code == 500
+
+
+def test_limite_por_hora(client, job_env, monkeypatch):
+    monkeypatch.setattr(settings, 'MAX_JOBS_PER_HOUR', 1)
+    assert client.post('/api/informes/simple/email').status_code == 202
+    assert client.post('/api/informes/simple/email').status_code == 429
+
+
+def test_email_validaciones(client, job_env):
+    assert client.post('/api/informes/no_existe/email').status_code == 404
+    assert client.post('/api/informes/rango/email', params={'inicio': '2026-03-01'}).status_code == 400
+    assert client.post('/api/informes/rango/email',
+                       params={'inicio': '2026-07-01', 'fin': '2026-06-30'}).status_code == 400
+
+
+def test_error_smtp_marca_error(client, fake_db, job_env, monkeypatch):
+    def falla(*args, **kwargs):
+        raise RuntimeError('SMTP caído')
+    monkeypatch.setattr(mailer, 'send_report_email', falla)
+    job = _procesar(client, 'simple')
+    assert job['status'] == 'error' and 'SMTP caído' in job['error']
+
+
+def test_estado_job_inexistente(client):
+    assert client.get('/api/jobs/no-existe').status_code == 404

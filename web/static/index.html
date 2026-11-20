@@ -43,6 +43,11 @@
   }
   button:hover:not(:disabled) { background: var(--accent-hover); }
   button:disabled { opacity: 0.6; cursor: progress; }
+  button.secondary {
+    background: transparent; color: var(--accent);
+    border: 1px solid var(--accent); min-width: 0;
+  }
+  button.secondary:hover:not(:disabled) { background: var(--ok-bg); }
   .msg { flex-basis: 100%; font-size: 0.9rem; padding: 8px 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
   .msg.error { display: block; background: var(--error-bg); color: var(--error); }
   .msg.ok { display: block; background: var(--ok-bg); color: var(--ok); }
@@ -100,6 +105,13 @@ function fila(inf) {
   const btn = document.createElement('button');
   btn.textContent = 'Descargar Excel';
   controls.appendChild(btn);
+
+  const btnEmail = document.createElement('button');
+  btnEmail.type = 'button';
+  btnEmail.className = 'secondary';
+  btnEmail.textContent = 'Enviar por correo';
+  controls.appendChild(btnEmail);
+
   row.appendChild(controls);
 
   const msg = document.createElement('div');
@@ -107,6 +119,7 @@ function fila(inf) {
   row.appendChild(msg);
 
   btn.addEventListener('click', () => descargar(inf, fechas, btn, msg));
+  btnEmail.addEventListener('click', () => enviar(inf, fechas, btnEmail, msg));
   return row;
 }
 
@@ -171,6 +184,67 @@ async function descargar(inf, fechas, btn, msg) {
     btn.disabled = false;
     btn.textContent = 'Descargar Excel';
   }
+}
+
+async function enviar(inf, fechas, btn, msg) {
+  msg.className = 'msg';
+  const params = new URLSearchParams();
+  for (const [clave, input] of Object.entries(fechas)) {
+    if (!input.value) { mostrar(msg, 'error', 'Completa las fechas.'); return; }
+    params.set(clave, input.value);
+  }
+  if (fechas.inicio && fechas.fin && fechas.inicio.value > fechas.fin.value) {
+    mostrar(msg, 'error', 'La fecha "Desde" no puede ser posterior a "Hasta".');
+    return;
+  }
+  let url = 'api/informes/' + encodeURIComponent(inf.nombre) + '/email';
+  if ([...params].length) url += '?' + params;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Solicitando…';
+  try {
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      let detalle = 'Error ' + res.status;
+      try { const d = (await res.json()).detail; if (typeof d === 'string') detalle = d; } catch (_) {}
+      throw new Error(detalle);
+    }
+    const job = await res.json();
+    mostrar(msg, 'ok', 'En cola. Se enviará a ' + job.destinatarios.join(' y ') + ' cuando esté listo.');
+    seguirJob(job.id, msg);
+  } catch (e) {
+    mostrar(msg, 'error', e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+async function seguirJob(id, msg) {
+  const etiquetas = { pendiente: 'En cola', generando: 'Generando Excel' };
+  for (let i = 0; i < 600; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    let job;
+    try {
+      const res = await fetch('api/jobs/' + id);
+      if (!res.ok) throw new Error('No se pudo consultar el estado');
+      job = await res.json();
+    } catch (e) {
+      mostrar(msg, 'error', e.message);
+      return;
+    }
+    if (job.estado === 'listo') {
+      const filas = job.filas != null ? ` · ${job.filas} filas` : '';
+      mostrar(msg, 'ok', `Enviado a ${job.destinatarios.join(' y ')}${filas}.` + (job.error ? ` Aviso: ${job.error}` : ''));
+      return;
+    }
+    if (job.estado === 'error' || job.estado === 'expirado') {
+      mostrar(msg, 'error', job.error || 'El trabajo falló.');
+      return;
+    }
+    mostrar(msg, 'ok', (etiquetas[job.estado] || job.estado) + '…');
+  }
+  mostrar(msg, 'ok', 'Sigue en proceso; recibirás el correo cuando termine.');
 }
 
 function nombreArchivo(res) {

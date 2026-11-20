@@ -1,13 +1,28 @@
 services:
   sql2excel-web:
     build: .
+    image: sqltoexcel-web:latest
     container_name: sql2excel-web
     restart: unless-stopped
     # En LXC (Proxmox) Docker no puede crear el netns (falla al escribir
     # sysctls), así que el contenedor comparte la red del propio LXC.
     network_mode: host
-    # Credenciales de SQL Server: DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
+    # Credenciales de SQL Server y SMTP: ver .env
     env_file: .env
     volumes:
       # Montar Querys permite añadir o editar .sql sin reconstruir la imagen
       - ./Querys:/app/Querys:ro
+      # Informes generados y cola de trabajos (SQLite)
+      - ./data:/app/data
+
+  sql2excel-worker:
+    build: .
+    image: sqltoexcel-web:latest
+    container_name: sql2excel-worker
+    restart: unless-stopped
+    network_mode: host
+    command: ["python", "-m", "web.worker"]
+    env_file: .env
+    volumes:
+      - ./Querys:/app/Querys:ro
+      - ./data:/app/data

@@ -1,7 +1,8 @@
 """Versión web de SQL2Excel.
 
 Lista los .sql de Querys/, ejecuta el elegido contra SQL Server y devuelve
-el resultado como .xlsx para descargar. Pensada para red local (sin login).
+el resultado como .xlsx para descargar. Además permite encolar la generación
+y recibir por correo un enlace de descarga. Pensada para red local (sin login).
 
 Ejecutar desde la raíz del repositorio:
     uvicorn web.app:app --host 0.0.0.0 --port 8000
@@ -9,7 +10,7 @@ Ejecutar desde la raíz del repositorio:
 import os
 import sys
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -21,23 +22,11 @@ sys.path.insert(0, str(ROOT))
 
 from src.database.connection import ConnectionManager  # noqa: E402
 from src.database.executor import QueryExecutor  # noqa: E402
+from web import jobs, reports, settings  # noqa: E402
 
-QUERYS_DIR = Path(os.getenv('QUERYS_DIR', ROOT / 'Querys')).resolve()
-SQL_ENCODING = 'latin-1'
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
 app = FastAPI(title='SQL2Excel Web', docs_url=None, redoc_url=None)
-
-
-def _scripts():
-    """Mapa nombre -> ruta de los .sql disponibles (se relee en cada petición)."""
-    if not QUERYS_DIR.is_dir():
-        return {}
-    return {p.stem: p for p in sorted(QUERYS_DIR.glob('*.sql'), key=lambda p: p.stem.lower())}
-
-
-def _read_sql(path):
-    return path.read_text(encoding=SQL_ENCODING)
 
 
 def _remove(path):
@@ -45,6 +34,17 @@ def _remove(path):
         os.remove(path)
     except OSError:
         pass
+
+
+def _validar_fechas(sql, inicio, fin):
+    executor = QueryExecutor(None)
+    if executor.has_end_param(sql) and fin is None:
+        raise HTTPException(status_code=400, detail='Este informe requiere la fecha fin')
+    if inicio and fin and inicio > fin:
+        raise HTTPException(
+            status_code=400,
+            detail='La fecha de inicio no puede ser posterior a la fecha fin',
+        )
 
 
 @app.get('/', include_in_schema=False)
@@ -56,8 +56,8 @@ def index():
 def listar_informes():
     executor = QueryExecutor(None)
     informes = []
-    for nombre, path in _scripts().items():
-        sql = _read_sql(path)
+    for nombre, path in reports.scripts().items():
+        sql = reports.read_sql(path)
         inicio_default, _ = executor.default_dates(sql)
         informes.append({
             'nombre': nombre,
@@ -68,13 +68,73 @@ def listar_informes():
     return informes
 
 
+@app.post('/api/informes/{nombre}/email', status_code=202)
+def encolar_informe(
+    nombre: str,
+    inicio: date | None = Query(default=None, description='Fecha inicio (inclusiva)'),
+    fin: date | None = Query(default=None, description='Fecha fin (inclusiva)'),
+):
+    path = reports.scripts().get(nombre)
+    if path is None:
+        raise HTTPException(status_code=404, detail='Informe no encontrado')
+
+    sql = reports.read_sql(path)
+    _validar_fechas(sql, inicio, fin)
+
+    if not settings.ALLOWED_RECIPIENTS:
+        raise HTTPException(status_code=500, detail='No hay destinatarios configurados')
+
+    if jobs.count_recent(3600) >= settings.MAX_JOBS_PER_HOUR:
+        raise HTTPException(status_code=429, detail='Demasiadas solicitudes; intenta más tarde')
+
+    job_id = jobs.create_job(
+        nombre,
+        inicio.isoformat() if inicio else None,
+        fin.isoformat() if fin else None,
+    )
+    return {
+        'id': job_id,
+        'estado': jobs.STATUS_PENDING,
+        'destinatarios': settings.ALLOWED_RECIPIENTS,
+    }
+
+
+@app.get('/api/jobs/{job_id}')
+def estado_job(job_id: str):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail='Trabajo no encontrado')
+    return {
+        'id': job['id'],
+        'estado': job['status'],
+        'filas': job['filas'],
+        'error': job['error'],
+        'expira': job['expires_at'],
+        'destinatarios': settings.ALLOWED_RECIPIENTS,
+    }
+
+
+@app.get('/descargas/{token}')
+def descargar_por_token(token: str):
+    job = jobs.get_by_token(token)
+    if job is None:
+        raise HTTPException(status_code=404, detail='Enlace no válido')
+    if job['expires_at'] and datetime.fromisoformat(job['expires_at']) <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail='El enlace ha caducado')
+
+    path = settings.REPORTS_DIR / f'{job["id"]}.xlsx'
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail='El archivo ya no está disponible')
+    return FileResponse(path, media_type=XLSX_MIME, filename=job['filename'])
+
+
 @app.get('/api/informes/{nombre}')
 def descargar_informe(
     nombre: str,
     inicio: date | None = Query(default=None, description='Fecha inicio (inclusiva)'),
     fin: date | None = Query(default=None, description='Fecha fin (inclusiva)'),
 ):
-    path = _scripts().get(nombre)
+    path = reports.scripts().get(nombre)
     if path is None:
         raise HTTPException(status_code=404, detail='Informe no encontrado')
 
@@ -84,11 +144,8 @@ def descargar_informe(
         raise HTTPException(status_code=500, detail='Falta la configuración de la base de datos (.env)')
 
     executor = QueryExecutor(conn_manager)
-    sql = _read_sql(path)
-    if executor.has_end_param(sql) and fin is None:
-        raise HTTPException(status_code=400, detail='Este informe requiere la fecha fin')
-    if inicio and fin and inicio > fin:
-        raise HTTPException(status_code=400, detail='La fecha de inicio no puede ser posterior a la fecha fin')
+    sql = reports.read_sql(path)
+    _validar_fechas(sql, inicio, fin)
 
     fd, tmp_path = tempfile.mkstemp(prefix=f'{nombre}_', suffix='.xlsx')
     os.close(fd)
